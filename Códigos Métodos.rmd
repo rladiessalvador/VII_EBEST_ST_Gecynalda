@@ -1,0 +1,358 @@
+---
+title: "Códigos Métodos"
+author: "Profa. Gecynalda Gomes e Ítalo Sá"
+date: "2022-10-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+````{r graficos, echo = F, eval = T, prompt = T, comments = '', message = F, warning = FALSE}
+#### Pacotes
+library(readxl)
+library(keras) #aprendizado profundo
+library(caret) # utilidade de aprendizado de máquina
+library(tidyverse) #utilidade geral
+library(rnn)
+library(nnfor)
+library(MLmetrics)
+library(dplyr)
+library(ggplot2)
+library(neuralnet)
+library(quantmod)
+library(remotes)
+remotes::install_github("cran/DMwR")
+library(DMwR)
+library(forecast)
+````
+
+## Funções - Métricas de comparação
+```{r}
+EQM = function(estimado,real){
+  erro = (estimado - real)^2
+  mean(erro)
+}
+
+MAPE = function(estimado, real){
+  mean(abs((real - estimado)/real))*100
+}
+
+MASE = function(estimado,real){
+  erro_abs = abs(estimado - real)
+  mean(erro_abs)
+}
+
+SMAPE = function(estimado,real){
+  (1/length(real))*sum((abs(estimado - real))/((abs(real) + abs(estimado))/2))
+}
+```
+
+
+Carregamento da base
+
+```{r}
+library(readxl)
+COVIDBAHIA <- read_excel("Dados/Banco Estadual COVID-19 ÓBITOS_17-10-2022.xlsx") 
+```
+
+Convertendo o vetor para datas
+
+```{r}
+COVIDBAHIA$`DATA NOTIFICACAO OBITO` = as.Date(COVIDBAHIA$`DATA NOTIFICACAO OBITO`)
+datas = levels.default(factor(COVIDBAHIA$`DATA NOTIFICACAO OBITO`)) 
+datas = as.Date(as.factor(datas)) 
+```
+
+Contabilizando o número de óbitos por dia
+```{r}
+vitimas = NULL
+for (i in 1 : length(datas)){
+  vitimas[i] =
+    COVIDBAHIA %>%
+    filter(`DATA NOTIFICACAO OBITO` == datas[i]) %>%
+    summarise(sum(`DATA NOTIFICACAO OBITO` == datas[i]))
+}
+vitimas = unlist(vitimas)
+```
+
+Base com 2 colunas (Datas e o total de óbitos em cada data)
+```{r}
+Base = data.frame(datas,vitimas)
+```
+
+
+
+```{r}
+head(Base)
+tail(Base)
+
+serie=Base$vitimas
+
+covid.BA=ts(serie,start=2020-03-28,freq=365)
+```
+
+## Ajuste do modelo ARIMA(p,d,q)x(P,D,Q) 
+
+```{r}
+y = covid.BA     		## serie utilizada
+lag.entrada = c(1,2,3,4,5,6,7)  ## variaveis de entrada (lags de y)
+prev = 7		## numero de passos a frente para previsao
+
+l = max(lag.entrada)	## numero maximo de defasagens
+n = length(y) 		## numero de observacoes
+```
+
+## Construindo a matriz de entrada Y 
+
+* Constroi a matriz de entrada para os lags especificados antes
+```{r}
+Y=matrix(nrow=length(y),ncol=length(lag.entrada))
+for(m in 1:length(lag.entrada))
+{
+  e=lag.entrada[m]
+  for(i in 1:length(y))
+  {
+    if(i<=e)
+      for(a in 1:e)
+      {
+        Y[a,m]=0
+      }
+    else Y[i,m]=y[i-e]
+  }
+}
+
+```
+
+##  Separando dados de treinamento (ajuste) e de teste 
+
+```{r}
+y = y[(l+1):(n-prev)]
+X = Y[(l+1):(n-prev),]  			## matriz modelo apos eliminacao dos zeros
+
+y.teste = y[(n-prev+1):n]			## dados de teste
+X.teste = Y[(n-prev+1):n,]
+
+
+```
+
+
+## Usando a função `auto.arima` do pacote `forecast`
+
+```{r}
+Modelo.ARIMA <- auto.arima(y)
+summary(Modelo.ARIMA)
+
+autoplot(forecast(Modelo.ARIMA,h=prev))
+```
+
+
+## Predição 
+```{r}
+
+predicao.ARIMA = predict(Modelo.ARIMA,n.ahead=prev)
+comparacaoARIMA = data.frame(predicao.ARIMA$pred,y.teste)
+
+```
+
+
+
+## Métricas de comparação (valor estimado, valor real)
+
+```{r}
+EqmARIMA = EQM(predicao.ARIMA$pred,y.teste)
+MapeARIMA = MAPE(predicao.ARIMA$pred,y.teste)
+MaseARIMA = MASE(predicao.ARIMA$pred,y.teste)
+SmapeARIMA = SMAPE(predicao.ARIMA$pred,y.teste)
+```
+
+
+## Redes neurais MLP 
+```{r}
+df_covid.train <- data.frame(y,X)
+df_covid.test <- data.frame(y.teste,X.teste)
+```
+
+* Normaliza
+```{r}
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+```
+
+* Denormaliza
+```{r}
+denormalize <- function(x,minval,maxval) {
+  x*(maxval-minval) + minval
+}
+```
+
+Normalização da base de treinamento e de teste
+```{r}
+ddnorm.train <- as.data.frame(lapply(df_covid.train,normalize))
+ddnorm.test <- as.data.frame(lapply(df_covid.test,normalize))
+```
+
+Treinamento da rede MLP
+```{r}
+set.seed(374)
+modeloMLP = neuralnet(y ~  X6 + X7, data = ddnorm.train, hidden = c(3,4), stepmax = 1000, threshold = 1,learningrate = 0.5)
+
+plot(modeloMLP)
+```
+
+Predição com a escala normalizada
+```{r}
+predicao_normalizada = predict(modeloMLP,ddnorm.test[,-1])
+```
+
+Convertendo para a escala original
+```{r}
+minvec <- min(y.teste)
+maxvec <- max(y.teste)
+predicao_original = denormalize(predicao_normalizada,minvec,maxvec)
+
+predicao_original #valores preditos
+test$vitimas #valores reais
+
+comparacaoMLP = data.frame(predicao_original,test$vitimas)
+```
+
+Métricas de comparação (valor estimado, valor real)
+
+```{r}
+EqmMLP = EQM(predicao_original,test$vitimas)
+MapeMLP = MAPE(predicao_original,test$vitimas)
+MaseMLP = MASE(predicao_original,test$vitimas)
+SmapeMLP = SMAPE(predicao_original,test$vitimas)
+```
+
+## Redes recorrentes
+
+```{r}
+COVIDBAHIA <- read_excel("Dados/Banco Estadual COVID-19 ÓBITOS_17-10-2022.xlsx") #Carregamento da base
+
+#Convertendo o vetor para datas
+COVIDBAHIA$`DATA NOTIFICACAO OBITO` = as.Date(COVIDBAHIA$`DATA NOTIFICACAO OBITO`)
+datas = levels.default(factor(COVIDBAHIA$`DATA NOTIFICACAO OBITO`)) 
+datas = as.Date(as.factor(datas)) 
+
+#Funçao que contabilizando o número total de óbitos por dia
+vitimas = NULL
+for (i in 1 : length(datas)){
+  vitimas[i] =
+    COVIDBAHIA %>%
+    filter(`DATA NOTIFICACAO OBITO` == datas[i]) %>%
+    summarise(sum(`DATA NOTIFICACAO OBITO` == datas[i]))
+}
+vitimas = unlist(vitimas)
+
+#Base com 2 colunas (Datas e o total de óbitos em cada data)
+Base = data.frame(datas,vitimas)
+
+#Série defasada com 7 LAGS
+Base['X1'] = Lag(Base$vitimas,1)
+Base['X2'] = Lag(Base$vitimas,2)
+Base['X3'] = Lag(Base$vitimas,3)
+Base['X4'] = Lag(Base$vitimas,4)
+Base['X5'] = Lag(Base$vitimas,5)
+Base['X6'] = Lag(Base$vitimas,6)
+Base['X7'] = Lag(Base$vitimas,7)
+view(Base)
+
+#Atribuindo 1 aos NA
+Base[is.na(Base)] = 0
+View(Base)
+
+#Normalização dos dados
+minmax_obitos = linscale(Base$vitimas, minmax = list(mn = 0, mx =1))
+minmaax_x1 = linscale(Base$X1, minmax = list(mn = 0, mx =1))
+minmaax_x2 = linscale(Base$X2, minmax = list(mn = 0, mx =1))
+minmaax_x3 = linscale(Base$X3, minmax = list(mn = 0, mx =1))
+minmaax_x4 = linscale(Base$X4, minmax = list(mn = 0, mx =1))
+minmaax_x5 = linscale(Base$X5, minmax = list(mn = 0, mx =1))
+minmaax_x6 = linscale(Base$X6, minmax = list(mn = 0, mx =1))
+minmaax_x7 = linscale(Base$X7, minmax = list(mn = 0, mx =1))
+```
+
+Separando a base em treinamento e teste (t é a quantidade de dias que serão usados para teste)
+```{r}
+t = 7 #quantidade de passos à frente
+l = 7 #quantidade de lags
+
+train = Base[c((l+1):(nrow(Base)-t)),] #treinamento - matriz modelo apos eliminacao dos zeros
+test = Base[c((nrow(Base)-(t-1)):nrow(Base)),] #teste
+```
+
+
+Variável resposta (número de óbitos) e explicativas (7 Lags da série defasada) com t dias de teste 
+
+```{r}
+
+Y <- array(minmax_obitos$x[1:(nrow(Base) - t)],
+           dim=c(nrow(Base)-t, 1))
+
+X <- array(c(minmaax_x1$x[1:(nrow(Base) - t)],
+             minmaax_x2$x[1:(nrow(Base) - t)],
+             minmaax_x3$x[1:(nrow(Base) - t)],
+             minmaax_x4$x[1:(nrow(Base) - t)],
+             minmaax_x5$x[1:(nrow(Base) - t)],
+             minmaax_x6$x[1:(nrow(Base) - t)],
+             minmaax_x7$x[1:(nrow(Base) - t)]),
+           dim=c(nrow(Base)-t,1, 7))
+```
+
+Treinamento do algoritmo
+```{r}
+set.seed(9867)
+modeloRR = trainr(Y, X,learningrate = 0.6,numepochs = 10) #Modelo com 0.6 de taxa de aprendizagem e 10 épocas
+```
+
+Agrupando as variáveis explicativas normalizada em uma só base
+```{r}
+entrada = array(c(minmaax_x1$x[(nrow(Base) - t):nrow(Base)],
+                  minmaax_x2$x[(nrow(Base) - t):nrow(Base)],
+                  minmaax_x3$x[(nrow(Base) - t):nrow(Base)],
+                  minmaax_x4$x[(nrow(Base) - t):nrow(Base)],
+                  minmaax_x5$x[(nrow(Base) - t):nrow(Base)],
+                  minmaax_x6$x[(nrow(Base) - t):nrow(Base)],
+                  minmaax_x7$x[(nrow(Base) - t):nrow(Base)]),
+                dim=c(nrow(Base)-(nrow(Base) - t),1, 7))
+```
+
+Predição com a escala normalizada
+```{r}
+predicao_normalizada =as.data.frame(predictr(modeloRR, entrada))
+```
+
+Convertendo para a escala original
+```{r}
+predicao_original = linscale(predicao_normalizada$V1,
+                             minmax = minmax_obitos$minmax,
+                             rev = TRUE)
+
+predicao_original$x #valores preditos
+test$vitimas #valores reais
+
+comparacaoRR = data.frame(predicao_original$x,test$vitimas)
+```
+
+Métricas de comparação (valor estimado, valor real)
+```{r}
+
+EqmRR = EQM(predicao_original$x,test$vitimas)
+MapeRR = MAPE(predicao_original$x,test$vitimas)
+MaseRR = MASE(predicao_original$x,test$vitimas)
+SmapeRR = SMAPE(predicao_original$x,test$vitimas)
+```
+
+## Comparação dos 3 métodos
+```{r}
+
+c(EqmARIMA, MapeARIMA, MaseARIMA, SmapeARIMA)
+c(EqmMLP, MapeMLP, MaseMLP, SmapeMLP)
+c(EqmRR, MapeRR, MaseRR, SmapeRR)
+```
+
+
